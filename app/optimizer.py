@@ -95,6 +95,7 @@ def solve(hours: list[HourInput], battery: Battery, directives: list[Directive])
         [d for d in directives if d.directive_type != "max_grid_window"],
         [d for d in directives
          if d.directive_type not in ("max_grid_window", "minimum_battery_reserve")],
+        [d for d in directives if d.directive_type == "solar_reduction"],
         [],
     ]
     for tier, active in enumerate(tiers):
@@ -102,7 +103,21 @@ def solve(hours: list[HourInput], battery: Battery, directives: list[Directive])
         x = _solve_lp(sc)
         if x is not None:
             return _build_plan(sc, x), sc, tier
-    raise ValueError("scenario is infeasible even with all directives removed")
+
+    # Last resort: grid-only plan (no battery use). Should never fire if battery
+    # validators are in place, but prevents a 500 if something slips through.
+    sc = compile_scenario(hours, battery, [])
+    plan = []
+    for h in range(H):
+        plan.append({
+            "hour": h,
+            "grid_kwh": round(sc.demand[h], 6),
+            "solar_used_kwh": 0.0,
+            "battery_action": "idle",
+            "battery_kwh": 0.0,
+            "battery_energy_after_kwh": sc.initial,
+        })
+    return plan, sc, len(tiers)
 
 
 def summarise(plan: list[dict], sc: Scenario, directives: list[Directive],

@@ -9,6 +9,7 @@ Overlapping directives compose (tightest wins) instead of overriding each other.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 from .models import DIRECTIVE_TYPES, Battery, HourInput
@@ -53,7 +54,8 @@ def _finite(value) -> float | None:
         return None
     if isinstance(value, str):
         try:
-            value = float(value.strip())
+            value = float(re.sub(r'\s*(kwh|kw|bdt|%|percent)\s*$', '',
+                                 value.strip(), flags=re.IGNORECASE))
         except ValueError:
             return None
     if not isinstance(value, (int, float)):
@@ -64,6 +66,8 @@ def _finite(value) -> float | None:
 
 def _clean_hours(raw) -> list[int]:
     """Unique whole hours in 0..23, ascending. Anything else is dropped."""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        raw = [raw]
     if isinstance(raw, dict):   # {"start": 13, "end": 15} -> [13, 14], end excluded
         start, end = _finite(raw.get("start")), _finite(raw.get("end"))
         if start is None or end is None:
