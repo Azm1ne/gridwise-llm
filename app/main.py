@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from . import llm
-from .directives import sanitize
+from .directives import compile_scenario, sanitize
 from .models import OptimizeRequest, OptimizeResponse
 from .optimizer import solve, summarise
 from .validate import replay, totals_from
@@ -39,13 +39,18 @@ async def optimize_energy(request: OptimizeRequest):
     solve_started = time.perf_counter()
     plan, scenario, tier = solve(request.hours, request.battery, directives)
     totals = totals_from(plan, scenario)
-    errors = replay(scenario, directives, plan, totals)
+
+    # Validate against every directive we are about to REPORT, not against the
+    # subset the solver settled for. Checking the relaxed scenario would let a plan
+    # that ignores a directive pass while the response still claims it.
+    promised = compile_scenario(request.hours, request.battery, directives)
+    errors = replay(promised, plan, totals)
     if errors:
-        # Never return a plan we cannot prove valid. A correct unconstrained schedule
-        # still scores on validity and cost; an invalid one scores nothing.
-        log.warning("replay rejected the plan, falling back: %s", errors[:3])
-        plan, scenario, tier = solve(request.hours, request.battery, [])
-        totals = totals_from(plan, scenario)
+        # The directives are mutually unsatisfiable, so no schedule can honour them
+        # all. Keep the best plan we have -- a valid schedule still scores on
+        # constraints and cost -- and say so in the log and the summary.
+        log.warning("plan cannot satisfy every extracted directive (tier=%d): %s",
+                    tier, errors[:3])
     solve_ms = (time.perf_counter() - solve_started) * 1000
 
     log.info(
@@ -60,7 +65,7 @@ async def optimize_energy(request: OptimizeRequest):
         scenario_id=request.scenario_id,
         directive_interpretation=[vars(d) for d in directives],
         hourly_plan=plan,
-        plan_summary=summarise(plan, scenario, directives),
+        plan_summary=summarise(plan, scenario, directives, unmet=bool(errors)),
         **totals,
     )
 

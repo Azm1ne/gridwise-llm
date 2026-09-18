@@ -105,9 +105,12 @@ def solve(hours: list[HourInput], battery: Battery, directives: list[Directive])
     raise ValueError("scenario is infeasible even with all directives removed")
 
 
-def summarise(plan: list[dict], sc: Scenario, directives: list[Directive]) -> str:
+def summarise(plan: list[dict], sc: Scenario, directives: list[Directive],
+              unmet: bool = False) -> str:
     """Deterministic. plan_summary is presentation text and never carries scored data."""
     applied = [d.directive_type for d in directives if d.applies]
+    caveat = (" Some extracted directives were mutually unsatisfiable, so the plan "
+              "honours as many as are simultaneously feasible." if unmet else "")
     charge = sum(r["battery_kwh"] for r in plan if r["battery_action"] == "charge")
     cheapest = min(range(H), key=lambda h: sc.tariff[h])
     peak = max(range(H), key=lambda h: sc.tariff[h])
@@ -116,5 +119,5 @@ def summarise(plan: list[dict], sc: Scenario, directives: list[Directive]) -> st
         f"Charged {charge:.1f} kWh into the battery around the cheapest tariff hours "
         f"(min at hour {cheapest}) and discharged it across the expensive evening peak "
         f"(max at hour {peak}), using {sum(r['solar_used_kwh'] for r in plan):.1f} kWh of "
-        f"available solar. Battery ends the day at its starting level."
+        f"available solar. Battery ends the day at its starting level.{caveat}"
     )

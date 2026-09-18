@@ -34,7 +34,7 @@ def test_plan_is_valid_and_optimal(case):
     totals = totals_from(plan, scenario)
 
     assert tier == 0, "no directive should have needed relaxing"
-    assert replay(scenario, ground_truth(case), plan, totals) == []
+    assert replay(scenario, plan, totals) == []
     assert totals["total_cost_bdt"] <= case["expected_output"]["total_cost_bdt"] + 0.01
 
 
@@ -44,7 +44,7 @@ def test_reference_schedule_passes_replay(case):
     request = OptimizeRequest(**case["input"])
     scenario = compile_scenario(request.hours, request.battery, ground_truth(case))
     expected = case["expected_output"]
-    assert replay(scenario, ground_truth(case), expected["hourly_plan"], expected) == []
+    assert replay(scenario, expected["hourly_plan"], expected) == []
 
 
 def test_replay_catches_a_violated_directive():
@@ -56,7 +56,7 @@ def test_replay_catches_a_violated_directive():
 
     plan = [dict(row) for row in case["expected_output"]["hourly_plan"]]
     plan[3] = {**plan[3], "battery_action": "charge", "battery_kwh": 40.0}
-    errors = replay(scenario, directives, plan, case["expected_output"])
+    errors = replay(scenario, plan, case["expected_output"])
     assert any("charge" in e or "balance" in e for e in errors)
 
 
@@ -92,7 +92,7 @@ def test_no_op_only_directive_still_produces_a_valid_schedule():
     request = OptimizeRequest(**case["input"])
     directives = sanitize({}, len(request.operator_notes), request.battery)
     plan, scenario, _ = solve(request.hours, request.battery, directives)
-    assert replay(scenario, directives, plan, totals_from(plan, scenario)) == []
+    assert replay(scenario, plan, totals_from(plan, scenario)) == []
 
 
 def test_contradictory_directives_relax_instead_of_failing():
@@ -102,7 +102,7 @@ def test_contradictory_directives_relax_instead_of_failing():
     impossible = [Directive(0, True, "max_grid_window", {"hours": list(range(24)), "max_grid_kwh": 0.0}, "x")]
     plan, scenario, tier = solve(request.hours, request.battery, impossible)
     assert tier > 0
-    assert replay(scenario, [], plan, totals_from(plan, scenario)) == []
+    assert replay(scenario, plan, totals_from(plan, scenario)) == []
 
 
 # --- guardrail hardening: real ways a model mangles otherwise-correct output ---
@@ -191,3 +191,59 @@ def test_malformed_requests_return_controlled_400(mutate, label):
     payload = response.json()          # must be serialisable, and leak nothing
     assert payload["error"] == "invalid request"
     assert "Traceback" not in response.text and "File \"/" not in response.text
+
+
+# --- regressions for the code-review findings ---
+
+def test_replay_catches_an_unsatisfiable_directive_instead_of_passing_it():
+    """CR-01: replay once validated against the RELAXED scenario, so a plan that
+    ignored a directive passed clean while the response still claimed it."""
+    case = CASES[0]
+    request = OptimizeRequest(**case["input"])
+    impossible = [Directive(0, True, "max_grid_window",
+                            {"hours": list(range(24)), "max_grid_kwh": 1.0}, "x")]
+
+    plan, relaxed, tier = solve(request.hours, request.battery, impossible)
+    totals = totals_from(plan, relaxed)
+    assert tier > 0, "an impossible cap must force relaxation"
+
+    promised = compile_scenario(request.hours, request.battery, impossible)
+    errors = replay(promised, plan, totals)
+    assert errors, "validating against the promised directives must report the violation"
+    assert any("exceeds cap" in e for e in errors)
+
+
+def test_endpoint_reports_unmet_directives_but_still_returns_a_valid_plan():
+    """An unsatisfiable directive must not produce a 500 or a silently false claim."""
+    import copy
+    body = copy.deepcopy(CASES[0]["input"])
+    body["operator_notes"] = ["Grid import must never exceed 1 kWh in any hour."]
+    response = _client().post("/optimize-energy", json=body)
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["hourly_plan"]) == 24
+    assert payload["total_grid_kwh"] > 0
+
+
+def test_huge_hour_window_does_not_allocate():
+    """WR-01: end=1e9 would have materialised a billion-element range first."""
+    raw = {"directives": [{"note_index": 0, "directive_type": "no_charge_window",
+                           "structured_adjustment": {"hours": {"start": 0, "end": 1_000_000_000}}}]}
+    d = sanitize(raw, 1, BATTERY)[0]
+    assert d.structured_adjustment == {"hours": list(range(24))}
+
+
+@pytest.mark.parametrize("battery,label", [
+    ({"capacity_kwh": 200, "initial_energy_kwh": 10, "minimum_energy_kwh": 40,
+      "max_charge_kwh_per_hour": 50, "max_discharge_kwh_per_hour": 50}, "initial below minimum"),
+    ({"capacity_kwh": 200, "initial_energy_kwh": 900, "minimum_energy_kwh": 40,
+      "max_charge_kwh_per_hour": 50, "max_discharge_kwh_per_hour": 50}, "initial above capacity"),
+    ({"capacity_kwh": 200, "initial_energy_kwh": 100, "minimum_energy_kwh": 500,
+      "max_charge_kwh_per_hour": 50, "max_discharge_kwh_per_hour": 50}, "minimum above capacity"),
+])
+def test_infeasible_battery_is_a_400_not_a_500(battery, label):
+    """WR-02: these are unsatisfiable under end-of-day neutrality and used to 500."""
+    import copy
+    body = copy.deepcopy(CASES[0]["input"])
+    body["battery"] = battery
+    assert _client().post("/optimize-energy", json=body).status_code == 400, label

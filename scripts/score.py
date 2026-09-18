@@ -82,7 +82,7 @@ async def main():
         elapsed = time.perf_counter() - started
         latencies.append(elapsed)
 
-        errors = replay(scenario, directives, plan, result)
+        errors = replay(scenario, plan, result)
         if errors:
             invalid += 1
 

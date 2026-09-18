@@ -68,7 +68,9 @@ def _clean_hours(raw) -> list[int]:
         start, end = _finite(raw.get("start")), _finite(raw.get("end"))
         if start is None or end is None:
             return []
-        raw = list(range(int(start), int(end)))
+        # Clamp before materialising: these bounds come from the model, and an
+        # end of 1e9 would allocate tens of GB before the 0-23 filter ever ran.
+        raw = list(range(max(0, min(24, int(start))), max(0, min(24, int(end)))))
     if not isinstance(raw, list):
         return []
     hours = set()

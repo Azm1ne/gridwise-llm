@@ -186,8 +186,6 @@ async def extract(notes: list[str], battery: Battery) -> dict | None:
     None is a valid outcome: the caller degrades to a no-directive schedule rather
     than guessing. Never raises -- a provider outage must not become a 5xx.
     """
-    global _working_model
-
     api_key = api_key_from_env()
     if not api_key:
         log.error("no API key found (tried %s) -- degrading to no_op", ", ".join(KEY_NAMES))
@@ -207,15 +205,25 @@ async def extract(notes: list[str], battery: Battery) -> dict | None:
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
 
-    deadline = asyncio.get_running_loop().time() + BUDGET_S
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + BUDGET_S
 
     async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
         for model in candidates:
             for attempt in range(1 + len(RETRY_AFTER_S)):
+                # The budget guards EVERY attempt, not just the rate-limited path.
+                # Without this, a hanging provider could run 4 models x 2 attempts x
+                # TIMEOUT_S = 96s and blow the judge's 30s limit, turning a safe
+                # no_op degradation into no response at all.
+                remaining = deadline - loop.time()
+                if remaining <= 1.0:
+                    log.warning("llm budget exhausted, degrading to no_op")
+                    return None
                 try:
                     response = await client.post(
                         API_URL.format(model=model), json=payload,
                         headers={"x-goog-api-key": api_key},
+                        timeout=min(TIMEOUT_S, remaining),
                     )
                     response.raise_for_status()
                     text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -232,18 +240,23 @@ async def extract(notes: list[str], battery: Battery) -> dict | None:
                     log.error("gemini %s on %s: %s", status, model,
                               exc.response.text[:160])
 
-                    if status in (400, 404):
-                        _dead_models.add(model)      # retired or rejected: stop trying it
+                    if status == 404:
+                        _dead_models.add(model)      # id is retired: never try it again
                         if model == _working_model:
                             _working_model = None
                         break                        # move to the next candidate
+
+                    if status == 400:
+                        # Could be an invalid key or a transient rejection. Do NOT
+                        # blacklist -- doing so once made the service return all-no_op
+                        # 200s for the rest of the run with zero upstream calls.
+                        break
 
                     if status == 429:
                         # Quota is project-wide, so another model id would 429 too.
                         if attempt < len(RETRY_AFTER_S):
                             delay = _retry_delay(exc.response, RETRY_AFTER_S[attempt])
-                            remaining = deadline - asyncio.get_running_loop().time()
-                            if delay + TIMEOUT_S <= remaining:
+                            if delay + 2.0 <= deadline - loop.time():
                                 log.warning("gemini rate limited, retrying %s in %.1fs",
                                             model, delay)
                                 await asyncio.sleep(delay)

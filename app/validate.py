@@ -7,13 +7,19 @@ from __future__ import annotations
 
 import math
 
-from .directives import Directive, Scenario
+from .directives import Scenario
 
 TOL = 0.01
 
 
-def replay(sc: Scenario, directives: list[Directive], plan: list[dict], totals: dict) -> list[str]:
-    """Return a list of violations. Empty means the plan is valid."""
+def replay(sc: Scenario, plan: list[dict], totals: dict) -> list[str]:
+    """Return a list of violations. Empty means the plan is valid.
+
+    `sc` must be compiled from the directives we REPORT, not from whatever subset
+    the solver managed to satisfy. This previously took a `directives` argument it
+    never read, and callers passed the post-relaxation scenario -- so a plan that
+    ignored a directive validated clean while the response still claimed it.
+    """
     errors: list[str] = []
 
     if len(plan) != 24 or [r["hour"] for r in plan] != list(range(24)):

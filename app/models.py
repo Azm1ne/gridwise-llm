@@ -1,6 +1,6 @@
 """Request/response schemas — exactly the Problem Statement contract (S7, S10)."""
 from typing import Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DIRECTIVE_TYPES = (
     "solar_reduction",
@@ -33,6 +33,22 @@ class Battery(BaseModel):
     minimum_energy_kwh: float = Field(ge=0)
     max_charge_kwh_per_hour: float = Field(ge=0)
     max_discharge_kwh_per_hour: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _state_is_reachable(self):
+        """Reject batteries no schedule could satisfy.
+
+        End-of-day neutrality (spec 9.6) pins the final charge to the initial one,
+        so starting below the floor or above capacity is infeasible for ANY plan.
+        Without this the solver raises and the request became a 500 instead of a 400.
+        """
+        if self.initial_energy_kwh < self.minimum_energy_kwh:
+            raise ValueError("initial_energy_kwh is below minimum_energy_kwh")
+        if self.initial_energy_kwh > self.capacity_kwh:
+            raise ValueError("initial_energy_kwh exceeds capacity_kwh")
+        if self.minimum_energy_kwh > self.capacity_kwh:
+            raise ValueError("minimum_energy_kwh exceeds capacity_kwh")
+        return self
 
 
 class OptimizeRequest(BaseModel):
