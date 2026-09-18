@@ -67,7 +67,20 @@ async def optimize_energy(request: OptimizeRequest):
 
 @app.exception_handler(RequestValidationError)
 async def invalid_request(_: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=400, content={"error": "invalid request", "detail": exc.errors()[:5]})
+    """Return a controlled 400 with a detail body that is always serialisable.
+
+    pydantic puts the raw exception object in `ctx` for errors raised by custom
+    field validators. Passing exc.errors() through verbatim made json.dumps raise
+    inside the handler, turning a 400 into a 500. Only loc/msg/type are echoed --
+    they are plain strings, and nothing else belongs in a client-facing error.
+    """
+    detail = [
+        {"loc": [str(part) for part in err.get("loc", ())],
+         "msg": str(err.get("msg", "")),
+         "type": str(err.get("type", ""))}
+        for err in exc.errors()[:5]
+    ]
+    return JSONResponse(status_code=400, content={"error": "invalid request", "detail": detail})
 
 
 @app.exception_handler(Exception)

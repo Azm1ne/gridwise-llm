@@ -9,6 +9,7 @@ accuracy gain, and p95 latency is scored.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -164,6 +165,19 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODELS = ("gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash")
 
 _working_model: str | None = None   # first id that answered; tried first afterwards
+_dead_models: set[str] = set()      # ids that returned 404/400; never tried again
+
+# A 429 is a project-wide quota limit, so switching model id cannot help -- every
+# candidate shares the same bucket. Back off and retry the same id instead.
+#
+# The waits are sized to clear a per-minute quota window, not to look fast. Losing a
+# latency point (p95 5-15s still scores 2/3) to rescue a 25-point interpretation is
+# the right trade; the delay only ever fires when we are actually being throttled.
+RETRY_AFTER_S = (5.0, 12.0)
+
+# Hard ceiling on one extract() call. The judge fails a request at 30s, so we stop
+# well short and let the caller degrade to no_op rather than time out.
+BUDGET_S = float(os.getenv("LLM_BUDGET_S", "24"))
 
 
 async def extract(notes: list[str], battery: Battery) -> dict | None:
@@ -179,18 +193,25 @@ async def extract(notes: list[str], battery: Battery) -> dict | None:
         log.error("no API key found (tried %s) -- degrading to no_op", ", ".join(KEY_NAMES))
         return None
 
+    global _working_model
+
     configured = os.getenv("LLM_MODEL", DEFAULT_MODEL)
-    candidates = list(dict.fromkeys(
-        m for m in (_working_model, configured, *FALLBACK_MODELS) if m))
+    candidates = [m for m in dict.fromkeys(
+        (_working_model, configured, *FALLBACK_MODELS)) if m and m not in _dead_models]
+    if not candidates:
+        log.error("every candidate model is marked dead -- degrading to no_op")
+        return None
 
     payload = {
         "contents": [{"parts": [{"text": build_prompt(notes, battery)}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
 
+    deadline = asyncio.get_running_loop().time() + BUDGET_S
+
     async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
         for model in candidates:
-            for attempt in range(2):
+            for attempt in range(1 + len(RETRY_AFTER_S)):
                 try:
                     response = await client.post(
                         API_URL.format(model=model), json=payload,
@@ -203,20 +224,50 @@ async def extract(notes: list[str], battery: Battery) -> dict | None:
                         log.info("gemini model in use: %s", model)
                         _working_model = model
                     return parsed
+
                 except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
                     # Log why. A silent except here once hid a retired-model 404 on
                     # every request while the service still looked healthy.
-                    log.error("gemini %s on %s: %s", exc.response.status_code, model,
+                    log.error("gemini %s on %s: %s", status, model,
                               exc.response.text[:160])
-                    if exc.response.status_code in (400, 404):
+
+                    if status in (400, 404):
+                        _dead_models.add(model)      # retired or rejected: stop trying it
                         if model == _working_model:
-                            _working_model = None   # it died; stop preferring it
-                        break                        # retrying this id cannot help
+                            _working_model = None
+                        break                        # move to the next candidate
+
+                    if status == 429:
+                        # Quota is project-wide, so another model id would 429 too.
+                        if attempt < len(RETRY_AFTER_S):
+                            delay = _retry_delay(exc.response, RETRY_AFTER_S[attempt])
+                            remaining = deadline - asyncio.get_running_loop().time()
+                            if delay + TIMEOUT_S <= remaining:
+                                log.warning("gemini rate limited, retrying %s in %.1fs",
+                                            model, delay)
+                                await asyncio.sleep(delay)
+                                continue
+                            log.warning("gemini rate limited, no budget left to retry")
+                        return None                  # degrade safely, never time out
+
                     if attempt:
                         break
+
                 except Exception as exc:
                     log.error("gemini call failed on %s: %s: %s", model,
                               type(exc).__name__, exc)
                     if attempt:
                         break
     return None
+
+
+def _retry_delay(response: httpx.Response, default: float) -> float:
+    """Honour the provider's own Retry-After when it is short enough to be useful."""
+    header = response.headers.get("retry-after")
+    if header:
+        try:
+            return min(float(header), 8.0)
+        except ValueError:
+            pass
+    return default

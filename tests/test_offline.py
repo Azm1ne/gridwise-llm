@@ -160,3 +160,34 @@ def test_extra_keys_are_stripped_from_structured_adjustment():
                            "structured_adjustment": {"hours": [13], "factor": 0.2,
                                                      "reason": "clouds", "confidence": 0.9}}]}
     assert set(sanitize(raw, 1, BATTERY)[0].structured_adjustment) == {"hours", "factor"}
+
+
+# --- malformed request handling: every rejection must be a controlled 400 ---
+
+def _client():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize("mutate,label", [
+    (lambda d: d["hours"].__setitem__(5, {**d["hours"][5], "hour": 4}), "duplicate hour"),
+    (lambda d: d.__setitem__("hours", d["hours"][:23]), "only 23 hours"),
+    (lambda d: d.__setitem__("operator_notes", []), "zero notes"),
+    (lambda d: d.__setitem__("operator_notes", ["a", "b", "c", "d"]), "four notes"),
+    (lambda d: d.__setitem__("operator_notes", ["  "]), "blank note"),
+    (lambda d: d["hours"][0].__setitem__("demand_kwh", "lots"), "non-numeric demand"),
+    (lambda d: d["battery"].__setitem__("capacity_kwh", -50), "negative capacity"),
+    (lambda d: d.pop("battery"), "missing battery"),
+])
+def test_malformed_requests_return_controlled_400(mutate, label):
+    """A custom validator once put a ValueError object in the error body, so the
+    handler's own json.dumps raised and the 400 became a 500."""
+    import copy
+    body = copy.deepcopy(CASES[0]["input"])
+    mutate(body)
+    response = _client().post("/optimize-energy", json=body)
+    assert response.status_code == 400, f"{label} returned {response.status_code}"
+    payload = response.json()          # must be serialisable, and leak nothing
+    assert payload["error"] == "invalid request"
+    assert "Traceback" not in response.text and "File \"/" not in response.text
