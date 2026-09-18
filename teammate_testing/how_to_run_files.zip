@@ -1,0 +1,24 @@
+How to run it
+bash
+# terminal 1 — your service
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# terminal 2 — the harness
+python3 gridwise_test.py --url http://localhost:8000 \
+    --cases public_sample_cases.json edge_cases.json
+
+Useful variants:
+
+bash
+# just the official 10
+python3 gridwise_test.py --url http://localhost:8000 --cases public_sample_cases.json
+
+# one failing case, keep the raw response
+python3 gridwise_test.py --url http://localhost:8000 --cases edge_cases.json --only EDGE-22 --save out/
+
+# hunt LLM nondeterminism
+python3 gridwise_test.py --url http://localhost:8000 --cases public_sample_cases.json --repeat 3
+
+# final run against the deployed URL, from a different network
+python3 gridwise_test.py --url https://your-app.example.com \
+    --cases public_sample_cases.json edge_cases.json --report final.json --no-color

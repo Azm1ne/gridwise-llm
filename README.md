@@ -255,7 +255,7 @@ If replay fails, the service discards the plan and returns a no-directive solve 
 
 ## 8. Quickstart
 
-Clean machine, Python 3.11+. No steps beyond these.
+Clean machine, Python 3.12+. No steps beyond these.
 
 ```bash
 git clone https://github.com/Azm1ne/gridwise-llm.git
