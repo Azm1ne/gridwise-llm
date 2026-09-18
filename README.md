@@ -248,8 +248,12 @@ Checked at `0.01` absolute tolerance: 24 unique hours · finite non-negative val
 reserve floor and rate limits · `battery_kwh = 0` when idle · every directive window and
 grid cap · end-of-day neutrality · summary fields recomputed from `hourly_plan`.
 
-If replay fails, the service discards the plan and returns a no-directive solve instead.
-**An unprovable schedule is never returned.**
+Crucially, replay checks the plan against the directives the response **reports**, not
+against whatever subset the solver managed to satisfy. An earlier version validated the
+post-relaxation scenario, so a plan shipping 175 kWh against a reported 1 kWh cap passed
+with zero errors — the exact "extracted but not applied" failure the rubric zero-scores.
+When directives are mutually unsatisfiable the service returns the best feasible schedule
+and says so in `plan_summary` rather than silently claiming a constraint it broke.
 
 ---
 
@@ -372,7 +376,7 @@ Covers the optimizer against all ten public cases, the replay validator (includi
 negative control that corrupts a valid plan and asserts the validator catches it), and the
 guardrails against hostile model output.
 
-**Current result — 37 passed.** On every public case the LP reproduces the organizer's
+**Current result — 51 passed.** On every public case the LP reproduces the organizer's
 reference cost exactly:
 
 | Case | Our cost (BDT) | Reference | Ratio |
@@ -507,6 +511,13 @@ AI coding assistance was used during implementation, as permitted by the ruleboo
   this costs latency but keeps behaviour stateless and reproducible.
 - **Ambiguous relative reserves.** *"Keep 50% in reserve"* is read against battery
   capacity. If a hidden case means 50% of the *current* charge, that reading would differ.
+- **Free-tier provider quota is the binding constraint.** Paced requests score 10/10
+  interpretation at a p95 of 1.8s. Under 34 back-to-back requests the free tier throttles,
+  some notes degrade to `no_op`, and p95 rises past 5s. The service stays correct and
+  returns valid schedules throughout; the loss is interpretation credit, not validity.
+- **Relaxation is per directive type.** One unsatisfiable grid cap discards other grid
+  caps that were individually satisfiable. Organizer scenarios are guaranteed feasible,
+  so this path should not fire during judging.
 
 ---
 
