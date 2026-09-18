@@ -1,0 +1,14 @@
+# Render Blueprint. Deploy: render.com -> New -> Blueprint -> pick this repo.
+# The only manual step is pasting the API key, which is never stored in git.
+services:
+  - type: web
+    name: gridwise-llm
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false          # set in the Render dashboard, never committed
+      - key: LLM_MODEL
+        value: gemini-3.5-flash-lite
