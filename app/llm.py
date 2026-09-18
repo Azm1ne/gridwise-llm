@@ -157,34 +157,66 @@ def build_prompt(notes: list[str], battery: Battery) -> str:
     )
 
 
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+# Google retires model ids without notice: gemini-2.5-flash-lite started returning 404
+# ("no longer available to new users") mid-build. If the configured id is dead we walk
+# this list rather than losing every directive for the whole evaluation window.
+FALLBACK_MODELS = ("gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash")
+
+_working_model: str | None = None   # first id that answered; tried first afterwards
+
+
 async def extract(notes: list[str], battery: Battery) -> dict | None:
     """Return the model's raw parsed JSON, or None on any failure.
 
     None is a valid outcome: the caller degrades to a no-directive schedule rather
     than guessing. Never raises -- a provider outage must not become a 5xx.
     """
+    global _working_model
+
     api_key = api_key_from_env()
-    model = os.getenv("LLM_MODEL", "gemini-2.5-flash-lite")
     if not api_key:
         log.error("no API key found (tried %s) -- degrading to no_op", ", ".join(KEY_NAMES))
         return None
+
+    configured = os.getenv("LLM_MODEL", DEFAULT_MODEL)
+    candidates = list(dict.fromkeys(
+        m for m in (_working_model, configured, *FALLBACK_MODELS) if m))
 
     payload = {
         "contents": [{"parts": [{"text": build_prompt(notes, battery)}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
-    url = API_URL.format(model=model)
 
     async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
-        for attempt in range(2):
-            try:
-                response = await client.post(
-                    url, json=payload, headers={"x-goog-api-key": api_key}
-                )
-                response.raise_for_status()
-                text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text)
-            except Exception:
-                if attempt:   # second failure -- give up, caller degrades safely
-                    return None
+        for model in candidates:
+            for attempt in range(2):
+                try:
+                    response = await client.post(
+                        API_URL.format(model=model), json=payload,
+                        headers={"x-goog-api-key": api_key},
+                    )
+                    response.raise_for_status()
+                    text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    parsed = json.loads(text)
+                    if model != _working_model:
+                        log.info("gemini model in use: %s", model)
+                        _working_model = model
+                    return parsed
+                except httpx.HTTPStatusError as exc:
+                    # Log why. A silent except here once hid a retired-model 404 on
+                    # every request while the service still looked healthy.
+                    log.error("gemini %s on %s: %s", exc.response.status_code, model,
+                              exc.response.text[:160])
+                    if exc.response.status_code in (400, 404):
+                        if model == _working_model:
+                            _working_model = None   # it died; stop preferring it
+                        break                        # retrying this id cannot help
+                    if attempt:
+                        break
+                except Exception as exc:
+                    log.error("gemini call failed on %s: %s: %s", model,
+                              type(exc).__name__, exc)
+                    if attempt:
+                        break
     return None

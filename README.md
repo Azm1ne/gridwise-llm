@@ -430,7 +430,7 @@ supplied at run time. `.env` is excluded via `.dockerignore`.
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `GEMINI_API_KEY` | yes | — | Google Gemini credential. `LLM_API_KEY`, `GOOGLE_API_KEY` and `GOOGLE_GENAI_API_KEY` are accepted as aliases. |
-| `LLM_MODEL` | no | `gemini-2.5-flash-lite` | Model used for interpretation |
+| `LLM_MODEL` | no | `gemini-3.5-flash-lite` | Model used for interpretation |
 | `LLM_TIMEOUT_S` | no | `12` | Per-call timeout; one retry on transport failure |
 | `PORT` | no | `8000` | Listen port (set automatically by most hosts) |
 
