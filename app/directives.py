@@ -44,8 +44,19 @@ def _no_op(index: int, explanation: str = NO_OP_EXPLANATION) -> Directive:
 
 
 def _finite(value) -> float | None:
-    """Reject bools (isinstance of int in Python), NaN, inf, and non-numerics."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    """Coerce to a finite float. Rejects bools (an int subclass), NaN, inf, junk.
+
+    Numeric strings are accepted: models quote numbers often enough that dropping
+    "13" would cost a directive for no good reason.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
         return None
     value = float(value)
     return value if math.isfinite(value) else None
@@ -53,6 +64,11 @@ def _finite(value) -> float | None:
 
 def _clean_hours(raw) -> list[int]:
     """Unique whole hours in 0..23, ascending. Anything else is dropped."""
+    if isinstance(raw, dict):   # {"start": 13, "end": 15} -> [13, 14], end excluded
+        start, end = _finite(raw.get("start")), _finite(raw.get("end"))
+        if start is None or end is None:
+            return []
+        raw = list(range(int(start), int(end)))
     if not isinstance(raw, list):
         return []
     hours = set()
@@ -66,15 +82,22 @@ def _clean_hours(raw) -> list[int]:
 def sanitize(raw: dict | list, n_notes: int, battery: Battery) -> list[Directive]:
     """Return exactly n_notes directives in note_index order. Never raises."""
     entries = raw.get("directives") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        entries = []
     by_index: dict[int, dict] = {}
-    if isinstance(entries, list):
-        for position, entry in enumerate(entries):
-            if not isinstance(entry, dict):
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        claimed = _finite(entry.get("note_index"))
+        index = int(claimed) if claimed is not None and claimed.is_integer() else position
+        if not (0 <= index < n_notes) or index in by_index:
+            index = position   # bad or duplicated index: trust order instead
+        if not (0 <= index < n_notes) or index in by_index:
+            free = [i for i in range(n_notes) if i not in by_index]
+            if not free:
                 continue
-            index = _finite(entry.get("note_index"))
-            index = int(index) if index is not None and index.is_integer() else position
-            if 0 <= index < n_notes and index not in by_index:
-                by_index[index] = entry
+            index = free[0]
+        by_index[index] = entry
 
     return [_sanitize_one(i, by_index.get(i), battery) for i in range(n_notes)]
 
@@ -100,6 +123,8 @@ def _sanitize_one(index: int, entry: dict | None, battery: Battery) -> Directive
         factor = _finite(adjustment.get("factor"))
         if factor is None:
             return _no_op(index)
+        if 2.0 <= factor <= 100.0:   # "20" means 20% remaining, not "clamp to 1.0"
+            factor /= 100.0
         clean = {"hours": hours, "factor": min(1.0, max(0.0, factor))}
     elif kind == "minimum_battery_reserve":
         reserve = _finite(adjustment.get("minimum_energy_kwh"))

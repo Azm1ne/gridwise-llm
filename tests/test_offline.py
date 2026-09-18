@@ -103,3 +103,60 @@ def test_contradictory_directives_relax_instead_of_failing():
     plan, scenario, tier = solve(request.hours, request.battery, impossible)
     assert tier > 0
     assert replay(scenario, [], plan, totals_from(plan, scenario)) == []
+
+
+# --- guardrail hardening: real ways a model mangles otherwise-correct output ---
+
+def test_quoted_numbers_are_accepted():
+    """A quoted "13" is a correct answer badly typed. Dropping it costs a directive."""
+    raw = {"directives": [{"note_index": 0, "directive_type": "max_grid_window",
+                           "structured_adjustment": {"hours": ["18", "19"], "max_grid_kwh": "155"}}]}
+    d = sanitize(raw, 1, BATTERY)[0]
+    assert d.structured_adjustment == {"hours": [18, 19], "max_grid_kwh": 155.0}
+
+
+def test_percentage_factor_is_normalised_not_clamped():
+    """factor=20 means 20% remaining. Clamping to 1.0 would delete the directive."""
+    raw = {"directives": [{"note_index": 0, "directive_type": "solar_reduction",
+                           "structured_adjustment": {"hours": [13], "factor": 20}}]}
+    assert sanitize(raw, 1, BATTERY)[0].structured_adjustment["factor"] == 0.2
+
+
+def test_fraction_factor_is_left_alone():
+    raw = {"directives": [{"note_index": 0, "directive_type": "solar_reduction",
+                           "structured_adjustment": {"hours": [13], "factor": 0.25}}]}
+    assert sanitize(raw, 1, BATTERY)[0].structured_adjustment["factor"] == 0.25
+
+
+def test_start_end_window_expands_half_open():
+    raw = {"directives": [{"note_index": 0, "directive_type": "no_charge_window",
+                           "structured_adjustment": {"hours": {"start": 14, "end": 16}}}]}
+    assert sanitize(raw, 1, BATTERY)[0].structured_adjustment == {"hours": [14, 15]}
+
+
+def test_duplicate_note_index_does_not_drop_a_note():
+    """Two entries both claiming index 0 must still yield two distinct directives."""
+    raw = {"directives": [
+        {"note_index": 0, "directive_type": "no_charge_window", "structured_adjustment": {"hours": [2]}},
+        {"note_index": 0, "directive_type": "no_discharge_window", "structured_adjustment": {"hours": [18]}},
+    ]}
+    d = sanitize(raw, 2, BATTERY)
+    assert [x.directive_type for x in d] == ["no_charge_window", "no_discharge_window"]
+
+
+def test_missing_note_index_falls_back_to_position():
+    raw = {"directives": [
+        {"directive_type": "no_op", "structured_adjustment": None},
+        {"directive_type": "no_discharge_window", "structured_adjustment": {"hours": [18, 19]}},
+    ]}
+    d = sanitize(raw, 2, BATTERY)
+    assert d[1].directive_type == "no_discharge_window"
+    assert d[1].structured_adjustment == {"hours": [18, 19]}
+
+
+def test_extra_keys_are_stripped_from_structured_adjustment():
+    """The rubric scores adjustment SHAPE. Extra keys must never reach the response."""
+    raw = {"directives": [{"note_index": 0, "directive_type": "solar_reduction",
+                           "structured_adjustment": {"hours": [13], "factor": 0.2,
+                                                     "reason": "clouds", "confidence": 0.9}}]}
+    assert set(sanitize(raw, 1, BATTERY)[0].structured_adjustment) == {"hours", "factor"}

@@ -10,6 +10,7 @@ accuracy gain, and p95 latency is scored.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -17,8 +18,23 @@ import httpx
 
 from .models import Battery
 
+log = logging.getLogger("gridwise.llm")
+
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "12"))
+
+
+KEY_NAMES = ("LLM_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY")
+
+
+def api_key_from_env() -> str:
+    """Accept any of the names people actually paste. Google's own docs say
+    GEMINI_API_KEY, so insisting on LLM_API_KEY only invites a silent outage."""
+    for name in KEY_NAMES:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _load_dotenv() -> None:
@@ -28,6 +44,8 @@ def _load_dotenv() -> None:
         return
     for line in path.read_text().splitlines():
         line = line.strip()
+        if line.startswith("export "):
+            line = line[7:].strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
@@ -145,9 +163,10 @@ async def extract(notes: list[str], battery: Battery) -> dict | None:
     None is a valid outcome: the caller degrades to a no-directive schedule rather
     than guessing. Never raises -- a provider outage must not become a 5xx.
     """
-    api_key = os.getenv("LLM_API_KEY", "")
+    api_key = api_key_from_env()
     model = os.getenv("LLM_MODEL", "gemini-2.5-flash-lite")
     if not api_key:
+        log.error("no API key found (tried %s) -- degrading to no_op", ", ".join(KEY_NAMES))
         return None
 
     payload = {

@@ -26,9 +26,13 @@ CASES = json.loads((ROOT / "BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json").r
 
 
 def probe():
-    key = os.getenv("LLM_API_KEY", "")
+    key = llm.api_key_from_env()
     if not key:
-        sys.exit("LLM_API_KEY is not set (put it in .env)")
+        sys.exit(
+            "No API key found. Tried: " + ", ".join(llm.KEY_NAMES) + "\n"
+            "Create the file " + str(ROOT / ".env") + " containing:\n"
+            "    GEMINI_API_KEY=your_key_here"
+        )
     r = httpx.get("https://generativelanguage.googleapis.com/v1beta/models",
                   headers={"x-goog-api-key": key}, timeout=30)
     if r.status_code != 200:
