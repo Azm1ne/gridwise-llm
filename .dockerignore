@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.venv/
+.git/
+.planning/
+teammate_plan/
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.pdf
+*.md
